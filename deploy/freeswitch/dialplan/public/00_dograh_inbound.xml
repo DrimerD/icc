@@ -1,0 +1,29 @@
+<!--
+  Inbound dialplan for Dograh (public context).
+
+  Place in: conf/dialplan/public/00_dograh_inbound.xml
+
+  Routes inbound DIDs to the Dograh Lua script, which streams call audio to
+  Dograh over a WebSocket. Adjust the destination_number regex to match the
+  DID(s) you registered in Dograh.
+
+  NOTE: ulaw is required end-to-end — mod_audio_fork streams L16 derived from
+  the channel media, and the Dograh provider expects 8 kHz. Keep the codec
+  negotiation to PCMU/PCMA on the carrier leg.
+-->
+<include>
+  <context name="public">
+
+    <extension name="dograh_inbound">
+      <!-- Match your DID(s). Example: a single number, or a pattern. -->
+      <condition field="destination_number" expression="^(\+?380441234567)$">
+        <action application="set" data="hangup_after_bridge=true"/>
+        <action application="set" data="continue_on_fail=false"/>
+        <!-- Ensure a media path before streaming -->
+        <action application="answer"/>
+        <action application="lua" data="dograh_inbound.lua"/>
+      </condition>
+    </extension>
+
+  </context>
+</include>

@@ -1,0 +1,35 @@
+<!--
+  Carrier trunk for inbound calls into FreeSWITCH.
+
+  Place in: conf/sip_profiles/external/dograh_carrier.xml
+
+  Two common trunk styles:
+
+  (A) REGISTER-BASED — FreeSWITCH registers up to the carrier; the carrier
+      sends inbound INVITEs to that registration. Use the <gateway> below.
+
+  (B) IP-AUTHENTICATED — the carrier/Kamailio sends INVITEs to your IP with no
+      registration. In that case set register=false (or remove the gateway)
+      and instead allow the source IP via an ACL in autoload_configs/acl.conf.xml,
+      then reference that ACL with `apply-inbound-acl` on the external profile.
+
+  Inbound calls land in the `public` context (see dialplan/public/00_dograh_inbound.xml).
+-->
+<include>
+  <gateway name="dograh_carrier">
+    <param name="username" value="YOUR_TRUNK_USERNAME"/>
+    <param name="password" value="YOUR_TRUNK_PASSWORD"/>
+    <param name="realm" value="sip.your-carrier.com"/>
+    <param name="proxy" value="sip.your-carrier.com"/>
+    <param name="from-domain" value="sip.your-carrier.com"/>
+    <!-- (A) register-based trunk: -->
+    <param name="register" value="true"/>
+    <param name="expire-seconds" value="600"/>
+    <param name="retry-seconds" value="30"/>
+    <!-- (B) IP-authenticated trunk: set register=false and rely on an ACL. -->
+    <param name="context" value="public"/>
+    <!-- Force μ-law toward the carrier so the media is 8 kHz PCMU. -->
+    <param name="inbound-codec-prefs" value="PCMU,PCMA"/>
+    <param name="outbound-codec-prefs" value="PCMU,PCMA"/>
+  </gateway>
+</include>

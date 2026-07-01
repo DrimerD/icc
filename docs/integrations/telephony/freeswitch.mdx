@@ -1,0 +1,123 @@
+---
+title: "FreeSWITCH Integration"
+description: "Connect Dograh AI to FreeSWITCH for inbound calls via mod_audio_fork"
+---
+
+## Overview
+
+FreeSWITCH terminates SIP/RTP and streams call audio to Dograh over a
+WebSocket using `mod_audio_fork` (or `mod_audio_stream`). Dograh never speaks
+SIP — it consumes the audio stream and runs your voice-agent workflow.
+
+This integration is **inbound-only**. The flow has two legs:
+
+1. **HTTP webhook** — on an inbound call, a Lua dialplan script POSTs to
+   `POST /api/v1/telephony/inbound/run`. Dograh matches the called number to a
+   workflow, creates a run and returns the WebSocket URL.
+2. **WebSocket** — FreeSWITCH connects `audio_fork` to that URL and streams
+   L16 audio. Dograh's `FreeswitchFrameSerializer` bridges it into the pipeline
+   and sends synthesized audio back as `streamAudio` JSON frames.
+
+```
+Carrier/Kamailio ──SIP──▶ FreeSWITCH ──POST /inbound/run──▶ Dograh
+                          (mod_audio_fork) ──WS audio──────▶ Dograh
+```
+
+## Prerequisites
+
+- FreeSWITCH with **`mod_lua`** and **`mod_audio_fork`** (or `mod_audio_stream`) loaded.
+  `mod_audio_fork` is not in the default build — build it from the
+  [drachtio freeswitch-modules](https://github.com/drachtio/drachtio-freeswitch-modules)
+  (or use `mod_audio_stream`) and enable it in `modules.conf.xml`.
+- The `curl` binary on the FreeSWITCH host (used by the Lua script for the webhook POST).
+- A carrier trunk or Kamailio/OpenSIPS routing inbound INVITEs to FreeSWITCH.
+- A reachable Dograh instance (over HTTPS/`wss` in production).
+
+## Audio format
+
+Dograh's FreeSWITCH provider uses **G.711 / L16 at 8 kHz, mono**. Keep the
+carrier leg on `PCMU`/`PCMA` and pass `8000` as the `audio_fork` sampling rate.
+`mod_audio_fork` streams 16-bit PCM to Dograh and plays back the audio Dograh
+returns.
+
+## FreeSWITCH configuration
+
+Example files live in [`deploy/freeswitch/`](https://github.com/dograh-hq/dograh/tree/main/deploy/freeswitch):
+
+| File | Purpose |
+| --- | --- |
+| `sip_profiles/external/dograh_carrier.xml` | Carrier trunk (register-based or IP-authenticated) |
+| `dialplan/public/00_dograh_inbound.xml` | Routes the DID to the Lua script |
+| `scripts/dograh_inbound.lua` | POSTs to `/inbound/run`, then starts `audio_fork` |
+
+### 1. Trunk
+
+Use `dograh_carrier.xml`. For a **register-based** trunk keep `register=true`
+and fill in the carrier credentials. For an **IP-authenticated** trunk set
+`register=false` and allow the source IP via an ACL (`acl.conf.xml`) referenced
+with `apply-inbound-acl` on the external profile. Inbound calls must land in
+the `public` context.
+
+### 2. Dialplan
+
+Drop `00_dograh_inbound.xml` into `conf/dialplan/public/` and edit the
+`destination_number` regex to match your DID(s).
+
+### 3. Lua script
+
+Copy `dograh_inbound.lua` into your FreeSWITCH scripts directory
+(`conf/scripts/`) and edit the config block at the top:
+
+```lua
+local DOGRAH_BASE    = "https://api.dograh.com"   -- self-hosted: your backend
+local ACCOUNT_ID     = "fs-prod-1"                -- matches Account ID in Dograh
+local SHARED_SECRET  = "CHANGE_ME"                -- matches Shared Secret in Dograh
+local STREAM_APP     = "audio_fork"               -- or "audio_stream"
+```
+
+### 4. Reload
+
+```bash
+fs_cli -x "reloadxml"
+fs_cli -x "sofia profile external restart"
+```
+
+## Configuration in Dograh
+
+1. Open **/telephony-configurations** → **Add configuration**.
+2. Select **FreeSWITCH** as the provider.
+3. Fill in:
+
+   | Field | Description |
+   | --- | --- |
+   | **Account ID** | Identifier of this FreeSWITCH instance (must equal `ACCOUNT_ID` in the Lua script) |
+   | **Shared Secret** | Secret used to authenticate inbound webhooks (must equal `SHARED_SECRET`) |
+   | **DIDs / Extensions** | The inbound numbers handled here (optional) |
+
+4. **Save**, then open the configuration and add each DID as a **phone number**
+   and assign its **Inbound workflow**.
+
+## How inbound matching works
+
+`/inbound/run` matches the call to a config + phone number using the `To`
+(called number) and `account_id` from the webhook, verifies the shared secret,
+checks quota, creates the workflow run, and returns the WebSocket URL. The
+called number must be registered as a phone number on the FreeSWITCH
+configuration with an inbound workflow assigned.
+
+## Security
+
+- Always run the webhook and media over TLS (`https` / `wss`).
+- The Lua script sends the secret in `X-Dograh-Token` (compared in constant
+  time). Gateways that can compute HMAC may instead send
+  `X-Dograh-Signature` = hex HMAC-SHA256 of the raw body keyed by the secret.
+- Restrict who can reach the FreeSWITCH SIP port (carrier/Kamailio IPs only).
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Webhook rejected (401/400) | `ACCOUNT_ID`/`SHARED_SECRET` match the Dograh config; `X-Dograh-Token` header is sent; correct `DOGRAH_BASE` |
+| No `websocket_url` returned | The called DID is registered as a phone number on the config and has an inbound workflow; org has quota |
+| No audio | `mod_audio_fork` loaded; sampling rate `8000`; carrier negotiated `PCMU`/`PCMA`; `wss` reachable from FreeSWITCH |
+| Call connects then drops | Channel was answered before `audio_fork`; `park` keeps it up; check FreeSWITCH logs (`fs_cli`) |
