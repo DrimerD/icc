@@ -28,6 +28,7 @@ from api.db import db_client
 from api.enums import CallType, WorkflowRunMode
 from api.services.quota_service import authorize_workflow_run_start
 from api.services.telephony.call_transfer_manager import get_call_transfer_manager
+from api.services.telephony.inbound_vars import normalize_passthrough_vars
 from api.services.telephony.transfer_event_protocol import (
     TransferEvent,
     TransferEventType,
@@ -425,6 +426,53 @@ class ARIConnection:
                     return json.loads(response_text)
                 return {}
 
+    async def _get_channel_var(self, channel_id: str, variable: str) -> str:
+        """Read a channel variable (or evaluated dialplan function) via ARI.
+
+        ARI's ``GET /channels/{id}/variable`` evaluates dialplan functions, so
+        we can read PJSIP header data with ``PJSIP_HEADER(read,...)``.
+        """
+        data = await self._ari_request(
+            "GET",
+            f"/channels/{channel_id}/variable",
+            params={"variable": variable},
+        )
+        return (data or {}).get("value", "") or ""
+
+    async def _collect_passthrough_vars(self, channel_id: str) -> Dict[str, str]:
+        """Auto-collect all inbound ``X-*`` SIP headers as call-context vars.
+
+        Uses ``PJSIP_HEADERS(read,X-)`` to enumerate every ``X-`` header name on
+        the INVITE, reads each with ``PJSIP_HEADER(read,<name>)``, and returns
+        the normalized dict (prefix stripped, reserved keys dropped). No
+        dialplan or ``ari.conf`` changes are required — everything is read over
+        ARI. Requires a chan_pjsip channel; failures degrade to no vars.
+        """
+        try:
+            names_raw = await self._get_channel_var(
+                channel_id, "PJSIP_HEADERS(read,X-)"
+            )
+            if not names_raw:
+                return {}
+
+            raw: Dict[str, str] = {}
+            for name in (n.strip() for n in names_raw.split(",")):
+                if not name:
+                    continue
+                value = await self._get_channel_var(
+                    channel_id, f"PJSIP_HEADER(read,{name})"
+                )
+                if value:
+                    raw[name] = value
+
+            return normalize_passthrough_vars(raw)
+        except Exception as e:
+            logger.warning(
+                f"[ARI org={self.organization_id}] Failed to collect X- headers "
+                f"on channel {channel_id}: {e}"
+            )
+            return {}
+
     async def _answer_channel(self, channel_id: str) -> bool:
         """Answer an ARI channel."""
         await self._ari_request("POST", f"/channels/{channel_id}/answer")
@@ -564,21 +612,31 @@ class ARIConnection:
 
             user_id = workflow.user_id
 
-            # 3. Create workflow run
+            # 3. Create workflow run. Auto-collect any inbound X- SIP headers and
+            #    expose them as template vars ({{first_name}}, ...). Reserved keys
+            #    are set last so passthrough vars can never overwrite them.
             call_id = channel_id
+            passthrough_vars = await self._collect_passthrough_vars(channel_id)
+            if passthrough_vars:
+                logger.info(
+                    f"[ARI org={self.organization_id}] Inbound X- header vars for "
+                    f"channel {channel_id}: {sorted(passthrough_vars)}"
+                )
+            initial_context = {
+                **passthrough_vars,
+                "caller_number": caller_number,
+                "called_number": called_number,
+                "direction": "inbound",
+                "provider": "ari",
+                "telephony_configuration_id": self.telephony_configuration_id,
+            }
             workflow_run = await db_client.create_workflow_run(
                 name=f"ARI Inbound {caller_number}",
                 workflow_id=inbound_workflow_id,
                 mode=WorkflowRunMode.ARI.value,
                 user_id=user_id,
                 call_type=CallType.INBOUND,
-                initial_context={
-                    "caller_number": caller_number,
-                    "called_number": called_number,
-                    "direction": "inbound",
-                    "provider": "ari",
-                    "telephony_configuration_id": self.telephony_configuration_id,
-                },
+                initial_context=initial_context,
                 gathered_context={
                     "call_id": call_id,
                 },

@@ -217,6 +217,31 @@ When an inbound call activates a workflow, the following context is available to
 | `call_id` | The Asterisk channel ID |
 | `provider` | Always `ari` |
 
+## Passing custom call variables (SIP headers → `{{variables}}`)
+
+Any inbound SIP header named `X-*` / `x-*` / `X_*` / `x_*` is captured
+automatically and made available in your prompts with the prefix stripped —
+e.g. an INVITE header `X-first_name: Ada` becomes `{{first_name}}`.
+
+**No dialplan or `ari.conf` changes are required.** When the call enters
+Stasis, Dograh reads the headers over ARI by evaluating dialplan functions on
+the channel:
+
+1. `PJSIP_HEADERS(read,X-)` enumerates every `X-` header name on the INVITE.
+2. `PJSIP_HEADER(read,<name>)` reads each value.
+3. The `x-`/`x_` prefix is stripped and the values are merged into the
+   workflow run's context.
+
+Notes:
+
+- Requires a **chan_pjsip** channel (the modern SIP driver). Values are read
+  once, at call setup.
+- Only scalar values are kept; the reserved keys (`caller_number`,
+  `called_number`, `direction`, `provider`, `telephony_configuration_id`,
+  `call_id`) cannot be overwritten.
+- Have your carrier or Kamailio attach the headers on the INVITE (e.g.
+  Kamailio `append_hf("X-first_name: Ada\r\n")`).
+
 ## Troubleshooting
 
 <AccordionGroup>

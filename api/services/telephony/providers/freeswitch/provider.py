@@ -17,7 +17,6 @@ Dograh never receives SIP; outbound origination is not supported here.
 import hashlib
 import hmac
 import json
-import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from loguru import logger
@@ -29,6 +28,7 @@ from api.services.telephony.base import (
     NormalizedInboundData,
     TelephonyProvider,
 )
+from api.services.telephony.inbound_vars import normalize_passthrough_vars
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -174,22 +174,6 @@ class FreeswitchProvider(TelephonyProvider):
             raw_data=webhook_data,
         )
 
-    # Keys the inbound dispatcher owns — passthrough vars must never clobber them.
-    _RESERVED_CONTEXT_KEYS = frozenset(
-        {
-            "caller_number",
-            "called_number",
-            "direction",
-            "provider",
-            "telephony_configuration_id",
-            "call_id",
-        }
-    )
-
-    # Strips a leading x-/X-/x_/X_ header prefix (only when followed by a
-    # separator, so keys like "xerox" are left untouched).
-    _HEADER_PREFIX_RE = re.compile(r"^[xX][-_]")
-
     def inbound_context_vars(self, normalized_data: NormalizedInboundData) -> dict:
         """Promote caller-supplied ``variables`` into the call context.
 
@@ -200,38 +184,12 @@ class FreeswitchProvider(TelephonyProvider):
             {"To": "...", "From": "...", "variables":
                 {"X-first_name": "Ada", "x-last_name": "Lovelace"}}
 
-        The ``x-`` / ``x_`` prefix is stripped here so the values become
-        available in prompts as ``{{first_name}}`` / ``{{last_name}}``. Keys
-        arriving already without the prefix are accepted as-is. Only string
-        keys with scalar values are accepted; reserved dispatcher keys are
-        dropped.
+        The ``x-`` / ``x_`` prefix is stripped so the values become available
+        in prompts as ``{{first_name}}`` / ``{{last_name}}``. Normalization is
+        shared with the ARI provider via ``normalize_passthrough_vars``.
         """
         raw_vars = (normalized_data.raw_data or {}).get("variables")
-        if not isinstance(raw_vars, dict):
-            return {}
-
-        result: dict = {}
-        for key, value in raw_vars.items():
-            if not isinstance(key, str):
-                continue
-
-            norm = self._HEADER_PREFIX_RE.sub("", key).strip()
-            if not norm:
-                continue
-            if norm in self._RESERVED_CONTEXT_KEYS:
-                logger.warning(f"FreeSWITCH inbound var '{norm}' is reserved; ignoring")
-                continue
-            if not (isinstance(value, (str, int, float, bool)) or value is None):
-                logger.warning(
-                    f"FreeSWITCH inbound var '{norm}' has non-scalar value; ignoring"
-                )
-                continue
-            if norm in result:
-                logger.warning(
-                    f"FreeSWITCH inbound var '{norm}' seen twice; using last value"
-                )
-            result[norm] = value
-        return result
+        return normalize_passthrough_vars(raw_vars)
 
     @staticmethod
     def validate_account_id(config_data: dict, webhook_account_id: str) -> bool:
