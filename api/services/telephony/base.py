@@ -371,6 +371,24 @@ class TelephonyProvider(ABC):
             f"Agent-stream not supported for provider {self.PROVIDER_NAME}"
         )
 
+    def inbound_context_vars(
+        self, normalized_data: "NormalizedInboundData"
+    ) -> Dict[str, Any]:
+        """Extra template variables to expose on an inbound workflow run.
+
+        The returned dict is merged into the run's ``initial_context`` (which
+        feeds ``{{variable}}`` substitution in prompts) alongside the standard
+        ``caller_number`` / ``called_number`` / etc. Default is empty — a
+        provider overrides this to promote caller-supplied values (e.g. SIP
+        header data forwarded on the inbound webhook) into the call context.
+
+        Implementations must return only JSON-serializable, string-keyed data
+        and should not overwrite the reserved keys the dispatcher sets
+        (``caller_number``, ``called_number``, ``direction``, ``provider``,
+        ``telephony_configuration_id``).
+        """
+        return {}
+
     async def configure_inbound(
         self, address: str, webhook_url: Optional[str]
     ) -> ProviderSyncResult:

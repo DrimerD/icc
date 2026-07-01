@@ -150,6 +150,74 @@ async def test_start_inbound_stream_returns_ws_url():
     assert payload["call_id"] == "abc-123"
 
 
+def _nd(raw):
+    from api.services.telephony.base import NormalizedInboundData
+
+    return NormalizedInboundData(
+        provider="freeswitch",
+        call_id="c1",
+        from_number="+380501112233",
+        to_number="+380441234567",
+        direction="inbound",
+        call_status="in-progress",
+        account_id="fs-prod-1",
+        raw_data=raw,
+    )
+
+
+def test_inbound_context_vars_strips_prefix():
+    p = _provider()
+    vars_ = p.inbound_context_vars(
+        _nd(
+            {
+                "variables": {
+                    "X-first_name": "Ada",
+                    "x-last_name": "Lovelace",
+                    "X_age": 36,
+                    "already_plain": "keep",
+                }
+            }
+        )
+    )
+    assert vars_ == {
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+        "age": 36,
+        "already_plain": "keep",
+    }
+
+
+def test_inbound_context_vars_does_not_overstrip():
+    # "xerox" starts with x but not x-/x_, so it must be left untouched
+    p = _provider()
+    assert p.inbound_context_vars(_nd({"variables": {"xerox": "printer"}})) == {
+        "xerox": "printer"
+    }
+
+
+def test_inbound_context_vars_drops_reserved_and_non_scalar():
+    p = _provider()
+    vars_ = p.inbound_context_vars(
+        _nd(
+            {
+                "variables": {
+                    "X-first_name": "Ada",
+                    "x-provider": "evil",  # reserved after strip → dropped
+                    "X-called_number": "999",  # reserved after strip → dropped
+                    "x-payload": {"nested": 1},  # non-scalar → dropped
+                }
+            }
+        )
+    )
+    assert vars_ == {"first_name": "Ada"}
+
+
+def test_inbound_context_vars_empty_when_absent():
+    p = _provider()
+    assert p.inbound_context_vars(_nd({})) == {}
+    assert p.inbound_context_vars(_nd({"variables": "notadict"})) == {}
+
+
 def test_supports_transfers_false():
     assert _provider().supports_transfers() is False
 

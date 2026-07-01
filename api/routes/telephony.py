@@ -425,11 +425,28 @@ async def _create_inbound_workflow_run(
     normalized_data,
     telephony_configuration_id: int,
     from_phone_number_id: Optional[int] = None,
+    extra_context_vars: Optional[dict] = None,
 ) -> int:
-    """Create workflow run for inbound call and return run ID"""
+    """Create workflow run for inbound call and return run ID.
+
+    ``extra_context_vars`` are provider-supplied template variables (e.g.
+    caller data forwarded via SIP headers) merged into ``initial_context`` so
+    they resolve as ``{{variable}}`` in prompts. Reserved dispatcher keys take
+    precedence and cannot be overwritten.
+    """
     call_id = normalized_data.call_id
     numeric_suffix = int(str(uuid.uuid4()).replace("-", "")[:8], 16) % 100000000
     workflow_run_name = f"WR-TEL-IN-{numeric_suffix:08d}"
+
+    initial_context = {
+        **(extra_context_vars or {}),
+        # Reserved keys last so they always win over passthrough vars.
+        "caller_number": normalized_data.from_number,
+        "called_number": normalized_data.to_number,
+        "direction": "inbound",
+        "provider": provider,
+        "telephony_configuration_id": telephony_configuration_id,
+    }
 
     workflow_run = await db_client.create_workflow_run(
         workflow_run_name,
@@ -437,13 +454,7 @@ async def _create_inbound_workflow_run(
         provider,  # Use detected provider as mode
         user_id=user_id,
         call_type=CallType.INBOUND,
-        initial_context={
-            "caller_number": normalized_data.from_number,
-            "called_number": normalized_data.to_number,
-            "direction": "inbound",
-            "provider": provider,
-            "telephony_configuration_id": telephony_configuration_id,
-        },
+        initial_context=initial_context,
         gathered_context={
             "call_id": call_id,
         },
@@ -766,7 +777,9 @@ async def handle_inbound_run(request: Request):
             )
 
         # 5. Create workflow run + authorize quota before returning provider
-        # stream instructions.
+        # stream instructions. Providers may promote caller-supplied values
+        # (e.g. SIP header data) into the call context via inbound_context_vars.
+        extra_context_vars = provider_instance.inbound_context_vars(normalized_data)
         workflow_run_id = await _create_inbound_workflow_run(
             workflow_id,
             user_id,
@@ -774,6 +787,7 @@ async def handle_inbound_run(request: Request):
             normalized_data,
             telephony_configuration_id=telephony_configuration_id,
             from_phone_number_id=phone_row.id,
+            extra_context_vars=extra_context_vars,
         )
         quota_result = await authorize_workflow_run_start(
             workflow_id=workflow_id,

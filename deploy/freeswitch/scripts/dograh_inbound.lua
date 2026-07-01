@@ -26,6 +26,12 @@ local SHARED_SECRET  = "CHANGE_ME"                -- must match Shared Secret in
 local SAMPLE_RATE    = "8000"                     -- must match provider transport_sample_rate
 local MIX_TYPE       = "mono"                     -- caller audio only
 local STREAM_APP     = "audio_fork"               -- or "audio_stream" for mod_audio_stream
+
+-- Custom call variables are collected automatically: every inbound SIP header
+-- named X-*/x-*/X_*/x_* is forwarded to Dograh, where the prefix is stripped.
+-- So an INVITE header `X-first_name: Ada` becomes {{first_name}} in prompts.
+-- Inbound SIP headers are exposed by FreeSWITCH as channel variables named
+-- `sip_h_<Header-Name>`; we enumerate them via `uuid_dump`.
 -- =====================================
 
 local to_number   = session:getVariable("destination_number") or ""
@@ -36,10 +42,42 @@ freeswitch.consoleLog("info",
   string.format("[dograh] inbound call uuid=%s to=%s from=%s\n",
     call_uuid, to_number, from_number))
 
+-- Minimal JSON string escaper for header values.
+local function esc(s)
+  s = tostring(s or "")
+  s = s:gsub("\\", "\\\\"):gsub('"', '\\"')
+  s = s:gsub("[\r\n\t]", " ")
+  return s
+end
+
+-- Collect all inbound SIP headers named X-*/x-*/X_*/x_* by dumping the channel
+-- and scanning for `variable_sip_h_<name>` lines. We forward the original
+-- header name (minus the sip_h_ prefix); Dograh strips the x-/x_ prefix.
+local api = freeswitch.API()
+local dump = api:executeString("uuid_dump " .. call_uuid) or ""
+
+local var_parts = {}
+for line in dump:gmatch("[^\r\n]+") do
+  -- match "variable_sip_h_X-first_name: Ada" (and a no-prefix fallback)
+  local name, value = line:match("^variable_sip_h_([^:]+):%s*(.*)$")
+  if not name then
+    name, value = line:match("^sip_h_([^:]+):%s*(.*)$")
+  end
+  -- keep only X-/x-/X_/x_ headers
+  if name and name:match("^[xX][-_]") and value and value ~= "" then
+    table.insert(var_parts,
+      string.format('"%s":"%s"', esc(name), esc(value)))
+  end
+end
+local variables_json = "{" .. table.concat(var_parts, ",") .. "}"
+
+freeswitch.consoleLog("info",
+  "[dograh] forwarding variables: " .. variables_json .. "\n")
+
 -- Build a compact JSON body (no spaces — keeps shell/arg parsing simple).
 local body = string.format(
-  '{"To":"%s","From":"%s","CallSid":"%s","account_id":"%s","provider":"freeswitch"}',
-  to_number, from_number, call_uuid, ACCOUNT_ID)
+  '{"To":"%s","From":"%s","CallSid":"%s","account_id":"%s","provider":"freeswitch","variables":%s}',
+  esc(to_number), esc(from_number), esc(call_uuid), esc(ACCOUNT_ID), variables_json)
 
 -- POST to the Dograh inbound dispatcher using the system `curl` binary.
 local url = DOGRAH_BASE .. "/api/v1/telephony/inbound/run"

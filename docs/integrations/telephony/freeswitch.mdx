@@ -105,6 +105,51 @@ checks quota, creates the workflow run, and returns the WebSocket URL. The
 called number must be registered as a phone number on the FreeSWITCH
 configuration with an inbound workflow assigned.
 
+## Passing custom call variables (SIP headers → `{{variables}}`)
+
+You can forward caller data from the SIP INVITE into the call so prompts can
+use it as `{{first_name}}`, `{{last_name}}`, etc.
+
+**Every** inbound SIP header named `X-*` / `x-*` / `X_*` / `x_*` is forwarded
+automatically — no per-variable configuration. FreeSWITCH exposes inbound SIP
+headers as channel variables named `sip_h_<Header-Name>`; the Lua script
+enumerates them (`uuid_dump`), keeps the `x-`/`x_`-prefixed ones, and sends
+them to Dograh in a JSON `variables` object. Dograh strips the prefix.
+
+So an INVITE carrying:
+
+```
+X-first_name: Ada
+X-last_name: Lovelace
+```
+
+produces this webhook body:
+
+```json
+{
+  "To": "+380441234567",
+  "From": "+380501112233",
+  "CallSid": "…",
+  "account_id": "fs-prod-1",
+  "provider": "freeswitch",
+  "variables": { "X-first_name": "Ada", "X-last_name": "Lovelace" }
+}
+```
+
+and the values become available in prompts as `{{first_name}}` /
+`{{last_name}}`. Notes:
+
+- The `x-`/`X-`/`x_`/`X_` prefix is stripped (only when followed by a
+  separator, so a header like `xerox` is left intact).
+- Only scalar values (string/number/bool/null) are accepted; nested objects
+  are dropped.
+- Reserved keys (`caller_number`, `called_number`, `direction`, `provider`,
+  `telephony_configuration_id`, `call_id`) cannot be overwritten (after prefix
+  stripping).
+- To attach these headers, set them on the INVITE upstream (e.g. Kamailio
+  `append_hf("X-first_name: Ada\r\n")`), or have FreeSWITCH populate them from
+  a lookup before calling the script.
+
 ## Security
 
 - Always run the webhook and media over TLS (`https` / `wss`).
